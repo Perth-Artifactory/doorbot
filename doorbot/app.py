@@ -655,7 +655,30 @@ async def read_tags():
                             os.path.join(config.sounds_dir, "granted.mp3")
                         )
 
-                    general_logger.info(f"read_tags - Access granted: tag = '{tag}'")
+                    name = result.get("name", "Unknown")
+                    general_logger.info(
+                        f"read_tags - Access granted: tag = '{tag}', name = '{name}'"
+                    )
+
+                    # Slack notification
+                    response = await app.client.chat_postMessage(
+                        channel=config.channel,
+                        **slack_blocks.door_access(
+                            name=name,
+                            tag=tag,
+                            status=":white_check_mark: Door unlocked",
+                            level="member",
+                        ),
+                    )
+
+                    # Webhook call for home assistant (photos)
+                    data = {"ts": response["ts"]}
+                    requests.put(
+                        config.access_granted_webhook,
+                        data=json.dumps(data),
+                        headers={"Content-type": "application/json"},
+                        timeout=1,
+                    )
 
                 else:
                     # Access denied
@@ -663,6 +686,17 @@ async def read_tags():
                     timer_blinkstick_white.set_wait_time(duration_s=5)
                     sound_player.play_denied()
                     general_logger.info(f"read_tags - Access denied: tag = '{tag}'")
+
+                    # Slack notification for denied access
+                    await app.client.chat_postMessage(
+                        channel=config.channel,
+                        **slack_blocks.door_access(
+                            name="Unknown",
+                            tag=tag,
+                            status=":x: Access denied",
+                            level="Unknown",
+                        ),
+                    )
 
             if len(key_reader.pending_errors) > 0:
                 # Set blinkstick off-red for 5 seconds
