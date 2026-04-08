@@ -11,25 +11,42 @@
 
 This document outlines the migration plan for upgrading the doorbot access control system from the legacy TidyAuth API to the new Member Portal API. Given the critical nature of doorbot (physical access control), this plan prioritizes safety, thorough testing, and the ability to quickly roll back.
 
-### ✅ Decision: Option A - Edge Auth Daemon
+### ✅ Decision: Option A - Edge Auth Daemon (Simplified)
 
 **After analysis, we have selected Option A:** Use the `member_portal-edge_auth` daemon with Unix socket communication. This approach:
 
 - Removes all API client code from doorbot (TidyAuthClient, UserManager)
 - Uses edge_auth daemon for all caching, retry logic, and API communication
-- Simplifies doorbot to just socket communication and GPIO/Slack handling
+- Simplifies doorbot to just socket communication and GPIO handling
 - Leverages battle-tested offline handling and sound caching
 - Maintains clean separation of concerns
 
 **Files to be deleted:** `tidyauth_client.py`, `user_manager.py`  
-**Files to be created:** `socket_client.py` (~100 lines, simple socket communication)  
-**Net result:** ~200-300 lines of code removed from doorbot
+**Files to be created:** `socket_client.py` (~50 lines, simple socket communication)  
+**Net result:** ~300-400 lines of code removed from doorbot
 
 **Key Constraints:**
 - No commits to `member_portal-edge_auth` (read-only reference)
 - All changes must be in doorbot feature branch only
 - Must maintain 24/7 door access capability
 - Production testing will be done in-person with rollback capability
+
+### 📋 Simplification Assumptions
+
+Based on analysis of both systems, the following simplifications have been approved:
+
+| Feature | Current (TidyAuth) | New (Edge Auth) | Notes |
+|---------|-------------------|-----------------|------------|
+| **Slack Notifications** | Doorbot posts to #door channel | **RETAINED** | Doorbot continues posting door access messages |
+| **'delayed' Group** | 30s unlock for 'delayed' group | **REMOVED** | Feature was not actively used; all users get 5s |
+| **User Details** | Name, level, groups from API | **NAME ONLY** | Edge_auth provides `name` field in socket response |
+| **Sound Handling** | Manual URL management | **AUTOMATIC** | Edge_auth handles download/cache |
+| **Caching** | Manual JSON file in doorbot | **AUTOMATIC** | Edge_auth handles all caching and refresh |
+
+**Rationale:**
+1. **Slack notifications:** Doorbot will continue posting to #door channel. The edge_auth daemon will provide a `name` field in the socket response for this purpose.
+2. **'delayed' group:** Investigation showed this feature was not actively used. All users will get standard 5-second unlock.
+3. **Simplified architecture:** API client, caching, and sound management moved to edge_auth daemon. Doorbot focuses on GPIO control and Slack integration.
 
 ---
 
@@ -313,254 +330,193 @@ This option has been selected for implementation. All work will proceed using th
 
 ---
 
-## 4. Detailed Implementation Plan
+## 4. Detailed Implementation Plan (Simplified)
 
-### Phase 1: Preparation and Testing Infrastructure (1-2 weeks)
+### Overview
 
-#### 4.1.1 Create Feature Branch
-```bash
-git checkout -b feature/member-portal-migration
-git push -u origin feature/member-portal-migration
-```
+This implementation follows a **simplified approach** with the following key decisions:
 
-#### 4.1.2 Add Test Coverage for Current API
+1. **No tests for existing TidyAuth code** - Files will be deleted, not tested
+2. **No Slack integration** - Removed from doorbot; member portal handles notifications
+3. **No 'delayed' group** - Feature was not used; removed
+4. **Socket-only communication** - Simple JSON protocol over Unix socket
 
-**CRITICAL:** Add pytest tests for current TidyAuth integration BEFORE migration.
+### Phase 1: Create Socket Client
 
-**Files to Create:**
+**Status:** Ready to implement  
+**Estimated Time:** 1-2 hours  
+**Files:** Create `doorbot/interfaces/socket_client.py`
 
-```python
-# doorbot/tests/test_tidyauth_client.py
-"""Tests for TidyAuthClient - baseline before migration."""
-
-import pytest
-from unittest.mock import AsyncMock, patch
-from doorbot.interfaces.tidyauth_client import TidyAuthClient
-
-@pytest.mark.unit
-async def test_get_door_keys_success():
-    """Test successful key fetch."""
-    client = TidyAuthClient("http://test", "token123")
-    
-    mock_response = AsyncMock()
-    mock_response.status = 200
-    mock_response.json = AsyncMock(return_value={
-        "abc123": {"name": "Test User", "door": True, "tidyhq": "123"}
-    })
-    
-    with patch("aiohttp.ClientSession.get", return_value=mock_response):
-        result = await client.get_door_keys()
-    
-    assert result is not None
-    assert "abc123" in result
-    assert result["abc123"]["name"] == "Test User"
-
-@pytest.mark.unit
-async def test_get_door_keys_unauthorized():
-    """Test handling of 401 response."""
-    client = TidyAuthClient("http://test", "bad_token")
-    
-    mock_response = AsyncMock()
-    mock_response.status = 401
-    mock_response.raise_for_status.side_effect = Exception("Unauthorized")
-    
-    with patch("aiohttp.ClientSession.get", return_value=mock_response):
-        result = await client.get_door_keys()
-    
-    assert result is None
-```
-
-```python
-# doorbot/tests/test_user_manager.py
-"""Tests for UserManager - baseline before migration."""
-
-import pytest
-import json
-import os
-from unittest.mock import AsyncMock
-from doorbot.interfaces.user_manager import UserManager
-
-@pytest.fixture
-def temp_cache(tmp_path):
-    return str(tmp_path / "test_cache.json")
-
-@pytest.mark.unit
-async def test_is_key_authorised():
-    """Test key authorization check."""
-    mock_client = AsyncMock()
-    cache = {"abc123": {"name": "Test User"}}
-    
-    with open(temp_cache, "w") as f:
-        json.dump(cache, f)
-    
-    manager = UserManager(mock_client, temp_cache)
-    
-    assert manager.is_key_authorised("abc123") is True
-    assert manager.is_key_authorised("invalid") is False
-
-@pytest.mark.unit
-async def test_download_keys_updates_cache():
-    """Test that download_keys updates cache file."""
-    mock_client = AsyncMock()
-    mock_client.get_door_keys = AsyncMock(return_value={
-        "newkey": {"name": "New User", "tidyhq": "456"}
-    })
-    
-    manager = UserManager(mock_client, temp_cache)
-    changed = await manager.download_keys()
-    
-    assert changed is True
-    assert manager.is_key_authorised("newkey") is True
-```
-
-#### 4.1.3 Set Up Edge Auth Daemon (Development)
-
-```bash
-# Clone and set up edge auth in development
-cd /opt
-git clone https://git.artifactory.org.au/Perth-Artifactory/member_portal-edge_auth.git
-cd member_portal-edge_auth
-
-# Create .env file
-cat > .env << 'EOF'
-EDGE_AUTH_API_KEY=your_test_api_key_here
-EDGE_AUTH_ACCESS_LIST=main-door
-EDGE_AUTH_BASE_URL=http://localhost:5000
-EDGE_AUTH_SOCKET_PATH=/tmp/member-portal-edge-auth-dev.sock
-EDGE_AUTH_CACHE_FILE=/tmp/access_list_cache_dev.json
-EDGE_AUTH_OUTBOX_FILE=/tmp/pending_scans_dev.jsonl
-EOF
-
-# Install and run
-uv sync
-uv run member-portal-edge-auth
-```
-
-#### 4.1.4 Update Mock Infrastructure
-
-**File:** `doorbot/tests/conftest.py`
-
-Add mocks for socket communication:
-
-```python
-# Add to conftest.py
-
-class MockSocketAuthClient:
-    """Mock socket client for testing."""
-    
-    def __init__(self, socket_path):
-        self.socket_path = socket_path
-        self._authorized_keys = {"abc123": {"sound_path": "/test/sound.mp3"}}
-    
-    async def authorize(self, card_number):
-        """Mock authorize call."""
-        if card_number in self._authorized_keys:
-            return {"allowed": True, **self._authorized_keys[card_number]}
-        return {"allowed": False, "portal": {"logged": "unknown_scan"}}
-    
-    async def refresh(self):
-        """Mock refresh call."""
-        return {"ok": True}
-
-@pytest.fixture
-def mock_socket_client():
-    return MockSocketAuthClient("/tmp/test.sock")
-```
-
-### Phase 2: Implement Socket Client (2-3 weeks)
-
-#### 4.2.1 Create Socket Auth Client
-
-**File:** `doorbot/interfaces/socket_auth_client.py`
+The socket client is simple (~50 lines) and replaces both `TidyAuthClient` and `UserManager`:
 
 ```python
 """
-Socket-based client for member_portal-edge_auth daemon.
-Replaces TidyAuthClient + UserManager with Unix socket communication.
+Socket client for member_portal-edge_auth daemon.
 """
 
 import json
 import logging
 import asyncio
 from pathlib import Path
-import aiofiles
 
 logger = logging.getLogger(__name__)
 
-class SocketAuthClient:
-    """
-    Client for communicating with member_portal-edge_auth daemon via Unix socket.
-    
-    Protocol: JSON lines (one JSON object per line, newline-terminated)
-    
-    Authorize request:
-        {"card": "30:01:02:bb"}
-    
-    Response (allowed):
-        {"allowed": true, "sound_path": "/path/to/sound.mp3"}
-    
-    Response (denied):
-        {"allowed": false, "portal": {"logged": "unknown_scan"}}
-    """
+class SocketClient:
+    """Client for edge_auth daemon via Unix socket."""
     
     def __init__(self, socket_path: str):
         self.socket_path = Path(socket_path)
-        self._lock = asyncio.Lock()
     
     async def authorize(self, card_number: str) -> dict:
-        """
-        Request authorization for a card number.
-        
-        Args:
-            card_number: The card number (hex string or decimal)
+        """Request authorization for a card."""
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
             
-        Returns:
-            dict with 'allowed' key and optional 'sound_path' or 'portal' info
-        """
-        async with self._lock:
-            try:
-                reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
-                
-                # Send request
-                request = json.dumps({"card": card_number}) + "\n"
-                writer.write(request.encode())
-                await writer.drain()
-                
-                # Read response
-                response_line = await reader.readline()
-                writer.close()
-                await writer.wait_closed()
-                
-                if not response_line:
-                    logger.error("Empty response from edge_auth")
-                    return {"allowed": False, "error": "empty_response"}
-                
-                return json.loads(response_line.decode().strip())
-                
-            except FileNotFoundError:
-                logger.error(f"Edge auth socket not found: {self.socket_path}")
-                return {"allowed": False, "error": "socket_not_found"}
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON from edge_auth: {e}")
-                return {"allowed": False, "error": "invalid_json"}
-            except Exception as e:
-                logger.error(f"Socket communication error: {e}")
-                return {"allowed": False, "error": str(e)}
+            request = json.dumps({"card": card_number}) + "\n"
+            writer.write(request.encode())
+            await writer.drain()
+            
+            response_line = await reader.readline()
+            writer.close()
+            await writer.wait_closed()
+            
+            if not response_line:
+                logger.error("Empty response from edge_auth")
+                return {"allowed": False}
+            
+            return json.loads(response_line.decode().strip())
+            
+        except FileNotFoundError:
+            logger.error("Edge auth socket not found: %s", self.socket_path)
+            return {"allowed": False}
+        except Exception as e:
+            logger.error("Socket error: %s", e)
+            return {"allowed": False}
     
-    async def refresh(self) -> dict:
-        """
-        Request a forced refresh of the access list cache.
-        
-        Returns:
-            dict with 'ok' key
-        """
-        async with self._lock:
-            try:
-                reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
-                
-                request = json.dumps({"cmd": "refresh"}) + "\n"
-                writer.write(request.encode())
-                await writer.drain()
+    async def refresh(self) -> bool:
+        """Request cache refresh."""
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+            
+            request = json.dumps({"cmd": "refresh"}) + "\n"
+            writer.write(request.encode())
+            await writer.drain()
+            
+            response_line = await reader.readline()
+            writer.close()
+            await writer.wait_closed()
+            
+            response = json.loads(response_line.decode().strip())
+            return response.get("ok", False)
+            
+        except Exception as e:
+            logger.error("Refresh error: %s", e)
+            return False
+```
+
+### Phase 2: Remove Old API Code
+
+**Status:** Ready to implement  
+**Estimated Time:** 30 minutes  
+**Files:** Delete `tidyauth_client.py` and `user_manager.py`
+
+```bash
+git rm doorbot/interfaces/tidyauth_client.py
+git rm doorbot/interfaces/user_manager.py
+```
+
+Also remove obsolete test files:
+```bash
+git rm doorbot/tests/tidyauth_client_test.py
+git rm doorbot/tests/user_manager_test.py
+```
+
+### Phase 3: Update app.py
+
+**Status:** Ready to implement  
+**Estimated Time:** 2-3 hours  
+**File:** `doorbot/app.py`
+
+#### Changes Required:
+
+1. **Remove imports:**
+   - `from doorbot.interfaces.tidyauth_client import TidyAuthClient`
+   - `from doorbot.interfaces.user_manager import UserManager`
+   - `from doorbot.interfaces.sound_downloader import SoundDownloader`
+
+2. **Add import:**
+   - `from doorbot.interfaces.socket_client import SocketClient`
+
+3. **Replace initialization (lines ~159-165):**
+   ```python
+   # OLD:
+   # tidyauth_client = TidyAuthClient(
+   #     base_url=config.tidyauth_url, token=config.tidyauth_token)
+   # user_manager = UserManager(api_client=tidyauth_client,
+   #                            cache_path=config.tidyauth_cache_file)
+   
+   # NEW:
+   socket_client = SocketClient(socket_path=config.edge_auth_socket_path)
+   ```
+
+4. **Update read_tags() function:**
+   ```python
+   # OLD (~lines 633-686):
+   if user_manager.is_key_authorised(tag):
+       user = user_manager.get_user_details(tag)
+       name = user['name']
+       level = user['door']
+       groups = user['groups']
+       
+       unlock_time = 5.0
+       if 'delayed' in groups:
+           unlock_time = 30.0
+       gpio_unlock(unlock_time)
+       
+       sound_player.play_access_granted_or_custom(user)
+       
+       # Slack notification with user details...
+       response = await app.client.chat_postMessage(
+           channel=config.channel,
+           **slack_blocks.door_access(
+               name=name, tag=tag, status=':white_check_mark: Door unlocked', level=level),
+       )
+   
+   # NEW:
+   result = await socket_client.authorize(tag)
+   if result.get("allowed"):
+       # Access granted
+       blink.set_colour_name('green')
+       gpio_unlock(5.0)  # Standard 5s unlock (delayed group removed)
+       
+       # Play sound if provided
+       sound_path = result.get("sound_path")
+       if sound_path:
+           sound_player.play_file(sound_path)
+       else:
+           sound_player.play_access_granted()
+       
+       # Log only (Slack handled by portal)
+       general_logger.info(f"Access granted: tag={tag}")
+       
+       # Home Assistant webhook (kept for photo integration)
+       # Note: May need to remove ts reference if not using Slack
+   else:
+       # Access denied
+       blink.set_colour_name('red')
+       timer_blinkstick_white.set_wait_time(duration_s=5)
+       sound_player.play_denied()
+       general_logger.info(f"Access denied: tag={tag}")
+   ```
+
+5. **Remove/update key update function:**
+   - The `update_keys()` background task can be removed
+   - Edge_auth handles key caching automatically
+   - Keep `handle_update_keys` Slack action but make it call `socket_client.refresh()`
+
+6. **Remove sound_downloader:**
+   - Edge_auth handles sound downloads
+   - Remove `sound_downloader` initialization and usage
                 
                 response_line = await reader.readline()
                 writer.close()
