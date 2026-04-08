@@ -60,14 +60,12 @@ This document provides a quick summary of the TidyAuth → Member Portal migrati
 }
 ```
 
-**New (Member Portal):**
+**Socket Response (from edge_auth):**
 ```json
 {
-  "card_number": {
-    "user_id": "uuid",
-    "card_id": "uuid",
-    "sound_id": "uuid-or-null"
-  }
+  "allowed": true,
+  "name": "User Name",
+  "sound_path": "/path/to/sound.mp3"
 }
 ```
 
