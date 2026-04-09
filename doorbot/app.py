@@ -667,7 +667,6 @@ async def read_tags():
                             name=name,
                             tag=tag,
                             status=":white_check_mark: Door unlocked",
-                            level="member",
                         ),
                     )
 
@@ -694,7 +693,6 @@ async def read_tags():
                             name="Unknown",
                             tag=tag,
                             status=":x: Access denied",
-                            level="Unknown",
                         ),
                     )
 
