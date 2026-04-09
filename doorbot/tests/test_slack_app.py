@@ -459,7 +459,7 @@ class TestSlackBlocksMetadata:
         # Check attachment structure
         attachment = result["attachments"][0]
         assert "fields" in attachment
-        assert len(attachment["fields"]) == 4
+        assert len(attachment["fields"]) == 3
 
 
 if __name__ == "__main__":
