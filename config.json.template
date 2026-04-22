@@ -7,11 +7,8 @@
     "admin_usergroup_handle": "doorbot-admins",
     "relay_channel": "R1",
     "door_sensor_channel": "SW1",
-    "tidyauth": {
-        "url": "http://enclave:5000",
-        "token": "",
-        "cache_file": "data/user_cache.json",
-        "update_interval_seconds": 60.0
+    "edge_auth": {
+        "socket_path": "run/member-portal-edge-auth.sock"
     },
     "sounds_dir": "sounds",
     "custom_sounds_dir": "data/custom_sounds",
